@@ -7,8 +7,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.History
 import androidx.compose.material.icons.filled.BuildCircle
-import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -20,6 +20,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
@@ -87,12 +88,12 @@ object Routes {
     const val SETTINGS = "settings"
 }
 
-data class TabSpec(val route: String, val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector)
+data class TabSpec(val route: String, val label: String, val icon: ImageVector)
 
 object Tabs {
     val all = listOf(
         TabSpec(Routes.BUILD, "Build", Icons.Filled.BuildCircle),
-        TabSpec(Routes.HISTORY, "History", Icons.Filled.History),
+        TabSpec(Routes.HISTORY, "History", Icons.AutoMirrored.Filled.History),
         TabSpec(Routes.SETTINGS, "Settings", Icons.Filled.Settings)
     )
 }
