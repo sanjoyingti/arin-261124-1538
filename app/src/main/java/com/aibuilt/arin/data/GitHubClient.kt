@@ -81,16 +81,19 @@ class GitHubClient {
         }
     }
 
+    /** Extracts GitHub's own "message" field from an error body, if present. */
+    private fun githubMessage(body: String): String? = runCatching {
+        json.parseToJsonElement(body).jsonObject["message"]?.jsonPrimitive?.content
+    }.getOrNull()
+
     private fun mapError(code: Int, body: String): ProviderException {
-        val githubMsg = runCatching {
-            json.parseToJsonElement(body).jsonObject["message"]?.jsonPrimitive?.content
-        }.getOrNull()
+        val githubMsg = githubMessage(body)
         return when (code) {
-            401 -> ProviderException(code, "GitHub rejected the token (401 Unauthorized). It was revoked or mistyped — reconnect GitHub in Settings.")
-            403 -> ProviderException(code, "GitHub refused the call (403 Forbidden). Rate limit reached or the token lacks the required scope.")
+            401 -> ProviderException(code, "GitHub rejected the token (401 Unauthorized). It was revoked or mistyped — reconnect GitHub in Settings." + (githubMsg?.let { " ($it)" } ?: ""))
+            403 -> ProviderException(code, "GitHub refused the call (403 Forbidden). Rate limit reached or the token lacks the required scope." + (githubMsg?.let { " ($it)" } ?: ""))
             404 -> ProviderException(
                 code,
-                "GitHub: Not Found — the repo doesn't exist or the token can't see it. " +
+                "GitHub: Not Found (HTTP 404) — the repo doesn't exist or the token can't see it. " +
                     "Fine-grained tokens need Contents + Administration write; classic tokens need the repo scope." +
                     (githubMsg?.let { " ($it)" } ?: "")
             )
@@ -144,11 +147,36 @@ class GitHubClient {
         }
 
     /**
+     * Returns the blob SHA of an existing file at [remotePath], or null if the
+     * file does not exist yet (needed so the Contents-API PUT can overwrite).
+     */
+    private fun existingFileSha(token: String, owner: String, repo: String, branch: String, remotePath: String): String? {
+        val url = "https://api.github.com/repos/$owner/$repo/contents/" +
+            java.net.URLEncoder.encode(remotePath.trimStart('/'), "UTF-8").replace("+", "%20") +
+            "?ref=" + java.net.URLEncoder.encode(branch, "UTF-8")
+        return try {
+            call(req(url, token = token)) { _, body ->
+                runCatching {
+                    json.parseToJsonElement(body).jsonObject["sha"]?.jsonPrimitive?.content
+                }.getOrNull()
+            }
+        } catch (e: ProviderException) {
+            if (e.code == 404) null else throw e
+        }
+    }
+
+    /**
      * Uploads each file via the GitHub Contents API:
      * PUT /repos/{owner}/{repo}/contents/{path} with base64 content and the
-     * message "Add files via Arin". Files are committed strictly one after
-     * another — one PUT per file, no git/trees batching — and every PUT is
-     * retried up to 3 attempts (2 s delay) on transient 422/502 responses.
+     * message "Add files via Arin". The old Git Data API flow (blobs +
+     * POST git/trees + create commit + update ref) is gone entirely — no
+     * batching, no base-tree lookup. Files are committed strictly one after
+     * another, one PUT per file (the Contents API creates a commit per PUT
+     * automatically). Disk files are read and base64-encoded as before.
+     *
+     * Every PUT is retried up to 3 attempts with a 2 s delay on transient
+     * 422/502 responses; on a retry the file SHA is re-fetched so a concurrent
+     * change doesn't wedge the retry loop.
      */
     suspend fun uploadFiles(
         token: String,
@@ -161,37 +189,51 @@ class GitHubClient {
         val results = mutableListOf<UploadOutcome>()
         files.forEachIndexed { index, upload ->
             onProgress(index, files.size, upload.remotePath)
+            val cleanPath = upload.remotePath.trimStart('/')
             val encoded = Base64.encodeToString(upload.contentBytes(), Base64.NO_WRAP)
+            var fileSha: String? = existingFileSha(token, owner, repo, branch, cleanPath)
+            var lastError: ProviderException? = null
             var attempt = 0
-            while (true) {
+            var committed: UploadOutcome? = null
+            while (attempt < MAX_PUT_ATTEMPTS) {
                 attempt++
                 try {
                     val payload = buildJsonObject {
                         put("message", "Add files via Arin")
                         put("branch", branch)
                         put("content", encoded)
+                        fileSha?.let { put("sha", it) }
                     }
-                    val url = "https://api.github.com/repos/$owner/$repo/contents/${upload.remotePath.trimStart('/')}"
-                    val outcome = call(req(url, method = "PUT", token = token, body = payload.toString())) { _, body ->
+                    val url = "https://api.github.com/repos/$owner/$repo/contents/$cleanPath"
+                    committed = call(req(url, method = "PUT", token = token, body = payload.toString())) { _, body ->
                         val parsed = runCatching {
                             json.decodeFromString(PutContentsResponse.serializer(), body)
                         }.getOrNull()
-                        UploadOutcome(upload.remotePath, parsed?.commit?.sha, attempt)
+                        UploadOutcome(cleanPath, parsed?.commit?.sha, attempt)
                     }
-                    results.add(outcome)
                     break
                 } catch (e: ProviderException) {
+                    lastError = e
                     val transient = e.code == 422 || e.code == 502
                     if (transient && attempt < MAX_PUT_ATTEMPTS) {
+                        if (e.code == 422) {
+                            fileSha = existingFileSha(token, owner, repo, branch, cleanPath)
+                        }
                         delay(RETRY_DELAY_MS)
                     } else {
-                        throw ProviderException(
-                            e.code,
-                            "Uploading '${upload.remotePath}' failed after $attempt attempt(s): " +
-                                "GitHub HTTP ${e.code}${e.message?.let { " — $it" } ?: ""}"
-                        )
+                        break
                     }
                 }
+            }
+            if (committed != null) {
+                results.add(committed)
+            } else {
+                val e = lastError
+                throw ProviderException(
+                    e?.code ?: -1,
+                    "Uploading '$cleanPath' failed after $attempt attempt(s): " +
+                        "GitHub HTTP ${e?.code ?: -1}${e?.message?.let { " — $it" } ?: ""}"
+                )
             }
         }
         results
