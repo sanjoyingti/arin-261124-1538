@@ -7,7 +7,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.History
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.BuildCircle
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
@@ -93,7 +93,7 @@ data class TabSpec(val route: String, val label: String, val icon: ImageVector)
 object Tabs {
     val all = listOf(
         TabSpec(Routes.BUILD, "Build", Icons.Filled.BuildCircle),
-        TabSpec(Routes.HISTORY, "History", Icons.AutoMirrored.Filled.History),
+        TabSpec(Routes.HISTORY, "History", Icons.Filled.History),
         TabSpec(Routes.SETTINGS, "Settings", Icons.Filled.Settings)
     )
 }
