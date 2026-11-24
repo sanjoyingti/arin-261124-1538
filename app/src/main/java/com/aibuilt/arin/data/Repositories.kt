@@ -55,7 +55,9 @@ class Repositories(context: Context) {
     private val buildsFile: File get() = File(appContext.filesDir, "build_history.json")
 
     suspend fun loadRepairs(): List<RepairRecord> = withContext(Dispatchers.IO) {
-        runCatching { json.decodeFromString(repairsFile.readText()) }.getOrDefault(emptyList())
+        runCatching {
+            json.decodeFromString(ListSerializer(RepairRecord.serializer()), repairsFile.readText())
+        }.getOrDefault(emptyList())
     }
 
     suspend fun appendRepair(level: String, message: String, round: Int = 0): RepairRecord {
@@ -72,11 +74,13 @@ class Repositories(context: Context) {
     }
 
     suspend fun saveRepairs(list: List<RepairRecord>) = withContext(Dispatchers.IO) {
-        repairsFile.writeText(json.encodeToString(list))
+        repairsFile.writeText(json.encodeToString(ListSerializer(RepairRecord.serializer()), list))
     }
 
     suspend fun loadBuilds(): List<BuildRecord> = withContext(Dispatchers.IO) {
-        runCatching { json.decodeFromString(buildsFile.readText()) }.getOrDefault(emptyList())
+        runCatching {
+            json.decodeFromString(ListSerializer(BuildRecord.serializer()), buildsFile.readText())
+        }.getOrDefault(emptyList())
     }
 
     suspend fun appendBuild(owner: String, repo: String, success: Boolean, summary: String): BuildRecord {
@@ -94,7 +98,7 @@ class Repositories(context: Context) {
     }
 
     suspend fun saveBuilds(list: List<BuildRecord>) = withContext(Dispatchers.IO) {
-        buildsFile.writeText(json.encodeToString(list))
+        buildsFile.writeText(json.encodeToString(ListSerializer(BuildRecord.serializer()), list))
     }
 
     suspend fun clearHistory() = withContext(Dispatchers.IO) {

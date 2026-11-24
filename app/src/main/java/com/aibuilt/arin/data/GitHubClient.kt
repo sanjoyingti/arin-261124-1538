@@ -1,7 +1,11 @@
 package com.aibuilt.arin.data
 
+import android.util.Base64
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
@@ -11,6 +15,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.File
 import java.util.concurrent.TimeUnit
 
 class ProviderException(val code: Int, message: String) : Exception(message)
@@ -21,6 +26,32 @@ sealed class UserCheck {
 }
 
 data class RepoResult(val existed: Boolean, val fullName: String)
+
+data class UploadOutcome(val path: String, val committedSha: String?, val attempts: Int)
+
+/**
+ * One file to upload. [localPath] points at a file on disk whose bytes are
+ * read and base64-encoded; if [localPath] is null, [bytes] is used directly.
+ */
+data class FileUpload(
+    val remotePath: String,
+    val localPath: String? = null,
+    val bytes: ByteArray? = null
+) {
+    fun contentBytes(): ByteArray = when {
+        localPath != null -> File(localPath).readBytes()
+        bytes != null -> bytes
+        else -> ByteArray(0)
+    }
+}
+
+@Serializable
+data class PutContentsResponse(
+    val commit: CommitRef? = null
+) {
+    @Serializable
+    data class CommitRef(val sha: String? = null)
+}
 
 class GitHubClient {
 
@@ -42,7 +73,7 @@ class GitHubClient {
         return b.build()
     }
 
-    private inline fun <T> call(request: Request, parse: (code: Int, body: String) -> T): T {
+    private fun <T> call(request: Request, parse: (code: Int, body: String) -> T): T {
         http.newCall(request).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
             if (resp.isSuccessful) return parse(resp.code, text)
@@ -112,6 +143,60 @@ class GitHubClient {
             }
         }
 
+    /**
+     * Uploads each file via the GitHub Contents API:
+     * PUT /repos/{owner}/{repo}/contents/{path} with base64 content and the
+     * message "Add files via Arin". Files are committed strictly one after
+     * another — one PUT per file, no git/trees batching — and every PUT is
+     * retried up to 3 attempts (2 s delay) on transient 422/502 responses.
+     */
+    suspend fun uploadFiles(
+        token: String,
+        owner: String,
+        repo: String,
+        branch: String = "main",
+        files: List<FileUpload>,
+        onProgress: suspend (index: Int, total: Int, path: String) -> Unit = { _, _, _ -> }
+    ): List<UploadOutcome> = withContext(Dispatchers.IO) {
+        val results = mutableListOf<UploadOutcome>()
+        files.forEachIndexed { index, upload ->
+            onProgress(index, files.size, upload.remotePath)
+            val encoded = Base64.encodeToString(upload.contentBytes(), Base64.NO_WRAP)
+            var attempt = 0
+            while (true) {
+                attempt++
+                try {
+                    val payload = buildJsonObject {
+                        put("message", "Add files via Arin")
+                        put("branch", branch)
+                        put("content", encoded)
+                    }
+                    val url = "https://api.github.com/repos/$owner/$repo/contents/${upload.remotePath.trimStart('/')}"
+                    val outcome = call(req(url, method = "PUT", token = token, body = payload.toString())) { _, body ->
+                        val parsed = runCatching {
+                            json.decodeFromString(PutContentsResponse.serializer(), body)
+                        }.getOrNull()
+                        UploadOutcome(upload.remotePath, parsed?.commit?.sha, attempt)
+                    }
+                    results.add(outcome)
+                    break
+                } catch (e: ProviderException) {
+                    val transient = e.code == 422 || e.code == 502
+                    if (transient && attempt < MAX_PUT_ATTEMPTS) {
+                        delay(RETRY_DELAY_MS)
+                    } else {
+                        throw ProviderException(
+                            e.code,
+                            "Uploading '${upload.remotePath}' failed after $attempt attempt(s): " +
+                                "GitHub HTTP ${e.code}${e.message?.let { " — $it" } ?: ""}"
+                        )
+                    }
+                }
+            }
+        }
+        results
+    }
+
     suspend fun remainingRateLimit(token: String?): Pair<Int, Int>? = withContext(Dispatchers.IO) {
         runCatching {
             call(req("https://api.github.com/rate_limit", token = token)) { _, body ->
@@ -122,5 +207,10 @@ class GitHubClient {
                 rem to lim
             }
         }.getOrNull()
+    }
+
+    companion object {
+        const val MAX_PUT_ATTEMPTS = 3
+        const val RETRY_DELAY_MS = 2_000L
     }
 }
